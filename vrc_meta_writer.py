@@ -6,23 +6,21 @@ import re
 import shutil
 import time
 import yaml
+import asyncio
 
 from struct import pack
 from zlib import crc32
+from watchgod import awatch, RegExpWatcher, Change
 
-
-# ログツール関連共通化したい
+vrc_dir = os.environ["USERPROFILE"] + "\\AppData\\LocalLow\\VRChat\\VRChat\\"
 def select_log():
-    vrc_dir = os.environ["USERPROFILE"] + "\\AppData\\LocalLow\\VRChat\\VRChat\\"
     log_files = glob.glob(vrc_dir + "output_log_*.txt")
     log_files.sort(key=os.path.getctime, reverse=True)
     return log_files[0]
 
-
 RETRY_LIMIT = 3
 
-
-def tail(thefile, realtime):
+async def tail(thefile, realtime):
     tried = 0
     # thefile.seek(0, 2)
     offset = thefile.tell()
@@ -32,7 +30,7 @@ def tail(thefile, realtime):
             if not line:
                 if realtime:
                     break
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
                 continue
             # VRChatが悪い
             if line == "\n" or line == "\r\n":
@@ -50,8 +48,7 @@ def tail(thefile, realtime):
                 offset = 0
                 continue
             thefile.seek(offset, 0)
-            time.sleep(0.5)
-
+            await asyncio.sleep(0.5)
 
 class LogToolBase:
     def init():
@@ -128,6 +125,34 @@ class VrcMetaTool(LogToolBase):
                     self.photographer = body
                     del self.events["Authenticated"]
 
+    async def process_file(self, log_file, realtime = False):
+        with open(log_file, "r", encoding="utf-8") as f:
+            print("open logfile : ", log_file)
+
+            async for line in tail(f, realtime):
+                self.execute(line)
+
+            for p in psutil.process_iter(attrs=["pid", "name"]):
+                if p.info["pid"] == os.getpid():
+                    if p.info["name"] != "vrc_meta_writer.exe":
+                        break
+                    print("\n\nEnterを押して終了")
+                    input()
+                    return
+        print("closed logfile : ", log_file)
+
+    async def watch(self):
+        current_task = asyncio.create_task(self.process_file(select_log()))
+        path_pattern = re.compile(r"output_log_.*\.txt$")
+        async for changes in awatch(vrc_dir):
+            paths = {path for (change_type, path) in changes if change_type == Change.added and path_pattern.search(path)}
+            if (len(paths) == 0):
+                continue
+            path = paths.pop()
+
+            current_task.cancel()
+            current_task = asyncio.create_task(self.process_file(path))
+
     # pngチャンク関連関数
     def has_meta(self, image):
         total_length = len(image)
@@ -169,8 +194,7 @@ class VrcMetaTool(LogToolBase):
             f.write(self.chunk(b"IEND", b""))
             return True
 
-
-def main():
+async def main():
     config = {}
     with open("config.yml", "r", encoding="utf-8") as conf:
         config = yaml.load(conf, Loader=yaml.SafeLoader)
@@ -197,21 +221,10 @@ def main():
         log_file = select_log()
 
     vrc_meta_tool = VrcMetaTool(config, user_names)
-
-    with open(log_file, "r", encoding="utf-8") as f:
-        print("open logfile : ", log_file)
-
-        lines = tail(f, (config["log_file"] != "") or not process_exist)
-        for line in lines:
-            vrc_meta_tool.execute(line)
-
-        for p in psutil.process_iter(attrs=["pid", "name"]):
-            if p.info["pid"] == os.getpid():
-                if p.info["name"] != "vrc_meta_writer.exe":
-                    break
-                print("\n\nEnterを押して終了")
-                input()
-
+    if (config["watch"]):
+        await vrc_meta_tool.watch()
+    else:
+        vrc_meta_tool.process_file(log_file, (config["log_file"] != "") or not process_exist)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

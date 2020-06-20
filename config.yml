@@ -1,2 +1,3 @@
 log_file: ''
 out_dir: 'meta_pic'
+watch: true
